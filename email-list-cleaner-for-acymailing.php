@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       Email List Cleaner for AcyMailing
  * Description:       Bulk remove email addresses from AcyMailing subscriber lists. This is an unofficial plugin and is not endorsed by, affiliated with, or supported by AcyMailing or its developers.
- * Version:           1.0.0
+ * Version:           1.0.3
  * Author:            Oddly Digital
  * Author URI:        https://oddly.digital/
  * License:           GPL-2.0-or-later
@@ -14,8 +14,20 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'ACYM_BC_VERSION',   '1.0.0' );
-define( 'ACYM_BC_LOG_TABLE', 'acym_bc_log' );
+define( 'ACYM_BC_VERSION',    '1.0.2' );
+define( 'ACYM_BC_LOG_TABLE',  'acym_bc_log' );
+
+/**
+ * Maximum number of email addresses that may be submitted in a single request.
+ *
+ * Processing very large lists in one HTTP request risks hitting PHP memory
+ * limits or server execution timeouts. This constant caps each run to a safe
+ * size. Administrators with larger lists should split them across multiple
+ * submissions. The value can be overridden in wp-config.php:
+ *
+ *   define( 'ACYM_BC_MAX_EMAILS', 500 );
+ */
+define( 'ACYM_BC_MAX_EMAILS', defined( 'ACYM_BC_MAX_EMAILS' ) ? ACYM_BC_MAX_EMAILS : 2000 );
 
 // ---------------------------------------------------------------------------
 // 1. Activation – create audit log table and set default options
@@ -47,6 +59,7 @@ function acym_bc_activate(): void {
     add_option( 'acym_bc_db_version',      ACYM_BC_VERSION );
     add_option( 'acym_bc_logging_enabled', '1' );
     add_option( 'acym_bc_log_retention',   '0' );
+    add_option( 'acym_bc_log_anonymise',   '1' );
 
     acym_bc_schedule_prune();
 }
@@ -214,6 +227,7 @@ function acym_bc_render_page(): void {
         check_admin_referer( 'acym_bc_settings_action', 'acym_bc_settings_nonce' );
         update_option( 'acym_bc_logging_enabled', isset( $_POST['acym_bc_logging_enabled'] ) ? '1' : '0' );
         update_option( 'acym_bc_log_retention',   (int) ( $_POST['acym_bc_log_retention'] ?? 0 ) );
+        update_option( 'acym_bc_log_anonymise',   isset( $_POST['acym_bc_log_anonymise'] ) ? '1' : '0' );
         $settings_notice = 'saved';
     }
 
@@ -394,7 +408,11 @@ function acym_bc_render_cleaner_tab( ?array $result, string $textarea ): void {
                         autocomplete="off"
                     ><?php echo esc_textarea( $textarea ); ?></textarea>
                     <p class="description">
-                        <?php esc_html_e( 'One address per line, or comma-separated.', 'email-list-cleaner-for-acymailing' ); ?>
+                        <?php echo esc_html( sprintf(
+                            /* translators: %d: maximum number of addresses per run */
+                            __( 'One address per line, or comma-separated. Maximum %d addresses per run — split larger lists into multiple submissions.', 'email-list-cleaner-for-acymailing' ),
+                            ACYM_BC_MAX_EMAILS
+                        ) ); ?>
                     </p>
                 </td>
             </tr>
@@ -509,27 +527,40 @@ function acym_bc_render_log_tab( ?string $notice ): void {
 /**
  * Renders a collapsible email list cell.
  * Addresses in $highlight are shown with an amber background (not found in DB).
+ * Entries prefixed with "sha256:" are displayed as anonymised hashes.
  */
 function acym_bc_render_email_cell( array $emails, array $highlight = [] ): void {
     if ( empty( $emails ) ) {
         echo '<span style="color:#999;">&#8212;</span>';
         return;
     }
-    $count = count( $emails );
+    $count      = count( $emails );
+    $is_hashed  = ! empty( $emails ) && strncmp( $emails[0], 'sha256:', 7 ) === 0;
     ?>
     <details>
         <summary style="cursor:pointer;">
             <?php echo esc_html( sprintf(
                 _n( '%d address', '%d addresses', $count, 'email-list-cleaner-for-acymailing' ),
                 $count
-            ) ); ?>
+            ) );
+            if ( $is_hashed ) {
+                echo ' <em style="font-weight:normal;color:#888;font-size:0.85em;">('
+                     . esc_html__( 'anonymised', 'email-list-cleaner-for-acymailing' )
+                     . ')</em>';
+            }
+            ?>
         </summary>
+        <?php if ( $is_hashed ) : ?>
+            <p style="margin:8px 0 4px;font-size:0.85em;color:#666;">
+                <?php esc_html_e( 'Addresses were anonymised at the time of logging. Only SHA-256 hashes are stored.', 'email-list-cleaner-for-acymailing' ); ?>
+            </p>
+        <?php endif; ?>
         <ul style="margin:6px 0 4px 0;padding:0;list-style:none;">
             <?php foreach ( $emails as $email ) :
                 $is_highlighted = in_array( $email, $highlight, true );
             ?>
                 <li style="margin:2px 0;">
-                    <code style="<?php echo $is_highlighted ? 'background:#fef3cd;padding:1px 4px;border-radius:3px;' : ''; ?>">
+                    <code style="<?php echo $is_highlighted ? 'background:#fef3cd;padding:1px 4px;border-radius:3px;' : ''; ?><?php echo $is_hashed ? 'font-size:0.8em;color:#666;' : ''; ?>">
                         <?php echo esc_html( $email ); ?>
                     </code>
                 </li>
@@ -546,6 +577,7 @@ function acym_bc_render_settings_tab( ?string $notice ): void {
 
     $logging_enabled = get_option( 'acym_bc_logging_enabled', '1' ) === '1';
     $log_retention   = (int) get_option( 'acym_bc_log_retention', 0 );
+    $log_anonymise   = get_option( 'acym_bc_log_anonymise', '0' ) === '1';
 
     $retention_options = [
         0                    => __( 'Keep forever',   'email-list-cleaner-for-acymailing' ),
@@ -589,6 +621,25 @@ function acym_bc_render_settings_tab( ?string $notice ): void {
             </tr>
 
             <tr>
+                <th scope="row"><?php esc_html_e( 'Anonymise Email Addresses in Log', 'email-list-cleaner-for-acymailing' ); ?></th>
+                <td>
+                    <label>
+                        <input type="checkbox"
+                               name="acym_bc_log_anonymise"
+                               value="1"
+                               <?php checked( $log_anonymise ); ?>>
+                        <?php esc_html_e( 'Store hashes instead of raw email addresses in the Audit Log', 'email-list-cleaner-for-acymailing' ); ?>
+                    </label>
+                    <p class="description">
+                        <?php esc_html_e(
+                            'When enabled, email addresses are replaced with SHA-256 hashes before being written to the log. The hashes cannot be reversed to recover the original addresses. This reduces the amount of personally identifiable information (PII) retained after a deletion run, which may assist with GDPR compliance.',
+                            'email-list-cleaner-for-acymailing'
+                        ); ?>
+                    </p>
+                </td>
+            </tr>
+
+            <tr>
                 <th scope="row">
                     <label for="acym_bc_log_retention">
                         <?php esc_html_e( 'Automatically Delete Logs', 'email-list-cleaner-for-acymailing' ); ?>
@@ -616,7 +667,29 @@ function acym_bc_render_settings_tab( ?string $notice ): void {
 }
 
 // ---------------------------------------------------------------------------
-// 12. Submission handler
+// 12. Email anonymisation helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns an array of anonymised representations of email addresses.
+ *
+ * When anonymisation is enabled each address is replaced with its SHA-256
+ * hash, prefixed with "sha256:" so the log display can identify and label
+ * them correctly. SHA-256 is one-way — the original address cannot be
+ * recovered from the hash — satisfying the GDPR principle of data
+ * minimisation while still providing an auditable record.
+ *
+ * @param  string[] $emails Plain-text email addresses.
+ * @return string[] Hashed representations, e.g. ["sha256:abc123..."].
+ */
+function acym_bc_anonymise_emails( array $emails ): array {
+    return array_map( function ( string $email ): string {
+        return 'sha256:' . hash( 'sha256', strtolower( trim( $email ) ) );
+    }, $emails );
+}
+
+// ---------------------------------------------------------------------------
+// 13. Submission handler
 // ---------------------------------------------------------------------------
 function acym_bc_handle_submission( string $raw ): array {
 
@@ -637,6 +710,18 @@ function acym_bc_handle_submission( string $raw ): array {
     }
 
     $valid_emails = array_keys( $valid_emails );
+
+    if ( count( $valid_emails ) > ACYM_BC_MAX_EMAILS ) {
+        return [
+            'success' => false,
+            'message' => sprintf(
+                /* translators: 1: number of addresses submitted, 2: maximum allowed */
+                __( 'Submission rejected — %1$d addresses were submitted but the maximum allowed per run is %2$d. Please split your list into smaller batches and run the tool multiple times.', 'email-list-cleaner-for-acymailing' ),
+                count( $valid_emails ),
+                ACYM_BC_MAX_EMAILS
+            ),
+        ];
+    }
 
     if ( ! empty( $invalid ) ) {
         return [
@@ -659,7 +744,7 @@ function acym_bc_handle_submission( string $raw ): array {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Core deletion logic
+// 14. Core deletion logic
 // ---------------------------------------------------------------------------
 function acym_bc_run_deletions( array $emails ): array {
     global $wpdb;
@@ -686,11 +771,11 @@ function acym_bc_run_deletions( array $emails ): array {
     );
 
     if ( $wpdb->last_error ) {
+        error_log( 'Email List Cleaner for AcyMailing — DB error (pre-deletion SELECT): ' . $wpdb->last_error );
         $wpdb->query( 'ROLLBACK' );
         return [
             'success' => false,
-            'message' => __( 'DB error checking existing addresses. No changes were made.', 'email-list-cleaner-for-acymailing' )
-                         . ' ' . esc_html( $wpdb->last_error ),
+            'message' => __( 'A database error occurred while checking existing addresses. No changes were made. Please check your server error log for details.', 'email-list-cleaner-for-acymailing' ),
         ];
     }
 
@@ -706,11 +791,11 @@ function acym_bc_run_deletions( array $emails ): array {
     $rows = $wpdb->query( $sql ); // phpcs:ignore
 
     if ( $rows === false || $wpdb->last_error ) {
+        error_log( 'Email List Cleaner for AcyMailing — DB error (step 1, list associations): ' . $wpdb->last_error );
         $wpdb->query( 'ROLLBACK' );
         return [
             'success' => false,
-            'message' => __( 'DB error removing list associations. No changes were made.', 'email-list-cleaner-for-acymailing' )
-                         . ' ' . esc_html( $wpdb->last_error ),
+            'message' => __( 'A database error occurred while removing list associations. No changes were made. Please check your server error log for details.', 'email-list-cleaner-for-acymailing' ),
         ];
     }
     $deleted['user_has_list'] = (int) $rows;
@@ -723,11 +808,11 @@ function acym_bc_run_deletions( array $emails ): array {
     $rows = $wpdb->query( $sql ); // phpcs:ignore
 
     if ( $rows === false || $wpdb->last_error ) {
+        error_log( 'Email List Cleaner for AcyMailing — DB error (step 2, user statistics): ' . $wpdb->last_error );
         $wpdb->query( 'ROLLBACK' );
         return [
             'success' => false,
-            'message' => __( 'DB error removing user statistics. No changes were made.', 'email-list-cleaner-for-acymailing' )
-                         . ' ' . esc_html( $wpdb->last_error ),
+            'message' => __( 'A database error occurred while removing user statistics. No changes were made. Please check your server error log for details.', 'email-list-cleaner-for-acymailing' ),
         ];
     }
     $deleted['user_stat'] = (int) $rows;
@@ -740,11 +825,11 @@ function acym_bc_run_deletions( array $emails ): array {
     $rows = $wpdb->query( $sql ); // phpcs:ignore
 
     if ( $rows === false || $wpdb->last_error ) {
+        error_log( 'Email List Cleaner for AcyMailing — DB error (step 3, subscriber records): ' . $wpdb->last_error );
         $wpdb->query( 'ROLLBACK' );
         return [
             'success' => false,
-            'message' => __( 'DB error removing subscriber records. No changes were made.', 'email-list-cleaner-for-acymailing' )
-                         . ' ' . esc_html( $wpdb->last_error ),
+            'message' => __( 'A database error occurred while removing subscriber records. No changes were made. Please check your server error log for details.', 'email-list-cleaner-for-acymailing' ),
         ];
         }
     $deleted['user'] = (int) $rows;
@@ -753,14 +838,17 @@ function acym_bc_run_deletions( array $emails ): array {
 
     // Audit log.
     if ( get_option( 'acym_bc_logging_enabled', '1' ) === '1' ) {
-        $current_user = wp_get_current_user();
+        $anonymise     = get_option( 'acym_bc_log_anonymise', '0' ) === '1';
+        $log_submitted = $anonymise ? acym_bc_anonymise_emails( $emails )           : $emails;
+        $log_removed   = $anonymise ? acym_bc_anonymise_emails( $actually_removed ) : $actually_removed;
+        $current_user  = wp_get_current_user();
         $wpdb->insert(
             $wpdb->prefix . ACYM_BC_LOG_TABLE,
             [
                 'user_id'      => $current_user->ID,
                 'user_login'   => $current_user->user_login,
-                'emails_json'  => wp_json_encode( $emails ),
-                'removed_json' => wp_json_encode( $actually_removed ),
+                'emails_json'  => wp_json_encode( $log_submitted ),
+                'removed_json' => wp_json_encode( $log_removed ),
                 'rows_list'    => $deleted['user_has_list'],
                 'rows_stat'    => $deleted['user_stat'],
                 'rows_user'    => $deleted['user'],

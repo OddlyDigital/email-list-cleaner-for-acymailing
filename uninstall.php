@@ -21,6 +21,7 @@ $wpdb->query( "DROP TABLE IF EXISTS {$table}" );
 delete_option( 'acym_bc_db_version' );
 delete_option( 'acym_bc_logging_enabled' );
 delete_option( 'acym_bc_log_retention' );
+delete_option( 'acym_bc_log_anonymise' );
 
 // Clear the scheduled pruning event.
 $timestamp = wp_next_scheduled( 'acym_bc_prune_logs' );

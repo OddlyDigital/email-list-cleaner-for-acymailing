@@ -27,9 +27,11 @@ Email List Cleaner for AcyMailing lets you paste any number of email addresses d
 - All deletions run inside a single database transaction — if any step fails, no changes are saved
 - Distinguishes between addresses submitted for removal and addresses actually found and removed in the audit log
 - Audit log records who ran the tool, when, which addresses were submitted, and which were actually removed
+- Email addresses in the audit log are anonymised by default — only SHA-256 hashes are stored, not the raw addresses
 - Configurable automatic log retention (7 days through to 2 years, or keep forever)
 - Option to manually delete all log entries
 - Logging can be disabled entirely from the Settings tab
+- Maximum of 2,000 addresses per submission to ensure server stability
 
 ---
 
@@ -51,6 +53,16 @@ Email List Cleaner for AcyMailing lets you paste any number of email addresses d
 Alternatively, upload the `email-list-cleaner-for-acymailing` folder directly to your `/wp-content/plugins/` directory via FTP and activate it from the Plugins page.
 
 Once activated, the plugin is available under Tools > Email List Cleaner for AcyMailing in your WordPress admin.
+
+---
+
+## Privacy and Data Handling
+
+By default, email addresses are anonymised before being written to the audit log. Each address is replaced with its SHA-256 hash — a one-way transformation that cannot be reversed to recover the original address. This means the log retains an auditable record of how many addresses were processed and whether each was found in the database, without storing personally identifiable information (PII).
+
+Anonymisation can be disabled from the Settings tab if you prefer to store raw addresses in the log. If disabled, you are responsible for ensuring that retention of those addresses is consistent with your privacy policy and any applicable data protection obligations, such as GDPR.
+
+The audit log table (`{prefix}acym_bc_log`) and all plugin settings are removed automatically when the plugin is deleted via the WordPress admin.
 
 ---
 
@@ -82,10 +94,27 @@ This tool permanently deletes records from your database. The plugin author acce
 - All database queries use `$wpdb->prepare()` with parameterised placeholders to prevent SQL injection
 - All output is escaped using WordPress escaping functions
 - A pre-deletion `SELECT` runs inside the transaction to determine which submitted addresses actually exist, so the audit log accurately reflects what was removed versus what was not found
+- Database errors are written to the server error log and are not exposed to the browser
+- Submissions are limited to 2,000 addresses per request to prevent resource exhaustion
 
 ---
 
 ## Changelog
+
+### 1.0.3
+
+- Audit log anonymisation is now enabled by default — SHA-256 hashes are stored instead of raw email addresses
+
+### 1.0.2
+
+- Added a per-request submission limit of 2,000 addresses to prevent PHP memory exhaustion and server timeouts
+- The limit is displayed in the textarea description and shown in the rejection message if exceeded
+- The limit can be overridden by defining `ACYM_BC_MAX_EMAILS` in `wp-config.php`
+
+### 1.0.1
+
+- Database errors are now written to the server error log via `error_log()` rather than being displayed in the browser, preventing potential information disclosure
+- Added an option to anonymise email addresses in the audit log using SHA-256 hashes
 
 ### 1.0.0
 
